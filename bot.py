@@ -168,11 +168,6 @@ class Database:
         self.cursor.execute('DELETE FROM movies WHERE id = ?', (movie_id,))
         self.conn.commit()
         return True
-    
-    def update_movie_thumbnail(self, movie_id, thumbnail):
-        self.cursor.execute('UPDATE movies SET thumbnail = ? WHERE id = ?', (thumbnail, movie_id))
-        self.conn.commit()
-        return True
 
 db = Database()
 
@@ -260,12 +255,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_callback(query, user_id)
     
     elif data == "skip_thumbnail":
+        context.user_data['skip_thumbnail'] = True
         context.user_data['upload_step'] = 'summary'
         await upload_show_summary(query, context)
     
     elif data == "add_thumbnail":
         context.user_data['upload_step'] = 'thumbnail'
-        await upload_step_thumbnail(query)
+        await query.edit_message_text(
+            "🖼️ *এখন থাম্বনেল ছবি পাঠান:*\n\n"
+            "একটি ছবি (JPEG/PNG) পাঠান অথবা /cancel লিখে বাতিল করুন।",
+            parse_mode='Markdown'
+        )
     
     elif data == "show_summary_after_photo":
         await upload_show_summary(query, context)
@@ -425,7 +425,7 @@ async def upload_step_title(query):
     text = """
 📤 *মুভি আপলোড সিস্টেম*
 
-🎬 *ধাপ ১/৭: মুভির নাম*
+🎬 *ধাপ ১/৬: মুভির নাম*
 মুভির পূর্ণ নাম লিখুন:
 
 উদাহরণ:
@@ -435,27 +435,6 @@ async def upload_step_title(query):
 """
     
     keyboard = [[InlineKeyboardButton("❌ বাতিল", callback_data="cancel_upload")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-async def upload_step_thumbnail(query):
-    text = """
-🖼️ *থাম্বনেল ছবি*
-
-আপনি চাইলে মুভির থাম্বনেল ছবি আপলোড করতে পারেন:
-1. একটি ছবি পাঠান (JPEG/PNG)
-2. অথবা থাম্বনেল ছাড়াই কন্টিনিউ করুন
-
-📌 *টিপস:*
-• ছবির সাইজ 5MB এর কম রাখুন
-• মুভির পোস্টার বা কভার ছবি পাঠান
-"""
-    
-    keyboard = [
-        [InlineKeyboardButton("⏭️ থাম্বনেল ছাড়া কন্টিনিউ", callback_data="skip_thumbnail")],
-        [InlineKeyboardButton("❌ বাতিল", callback_data="cancel_upload")]
-    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -725,7 +704,7 @@ async def show_stats(query):
 # ==================== মেসেজ হ্যান্ডলার ====================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    message_text = update.message.text.strip()
+    message_text = update.message.text.strip() if update.message.text else ""
     role = db.get_user_role(user_id)
     
     print(f"Message from {user_id}: {message_text[:50]}...")
@@ -735,12 +714,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_thumbnail_photo(update, context)
         return
     
-    # ২. যদি আপলোড মোডে থাকে (টেক্সট)
+    # ২. কমান্ড হ্যান্ডলিং
+    if message_text.startswith('/'):
+        if message_text.startswith('/cancel'):
+            context.user_data.clear()
+            await update.message.reply_text("❌ অপারেশন বাতিল হয়েছে!", parse_mode='Markdown')
+            return
+    
+    # ৩. যদি আপলোড মোডে থাকে (টেক্সট)
     if context.user_data.get('upload_mode'):
         await handle_upload_message(update, context)
         return
     
-    # ৩. যদি অ্যাডমিন এজেন্ট আইডি পাঠায় (সাধারণ মেসেজ হিসেবে)
+    # ৪. যদি অ্যাডমিন এজেন্ট আইডি পাঠায় (সাধারণ মেসেজ হিসেবে)
     if role == 'admin' and message_text.isdigit():
         agent_id = int(message_text)
         success = db.add_agent(agent_id, user_id)
@@ -750,7 +736,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ এজেন্ট অ্যাড করতে সমস্যা!", parse_mode='Markdown')
         return
     
-    # ৪. যদি মুভি সার্চ/রিকোয়েস্ট হয়
+    # ৫. যদি মুভি সার্চ/রিকোয়েস্ট হয়
     if len(message_text) > 1:
         # প্রথমে সার্চ করুন
         movies = db.search_movies(message_text)
@@ -789,13 +775,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         return
     
-    # ৫. ডিফল্ট রেসপন্স
+    # ৬. ডিফল্ট রেসপন্স
     await update.message.reply_text("✉️ মেসেজ রিসিভ হয়েছে!", parse_mode='Markdown')
 
 async def handle_thumbnail_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """থাম্বনেল ফটো হ্যান্ডলার"""
     user_id = update.effective_user.id
     step = context.user_data.get('upload_step', '')
+    
+    print(f"Thumbnail photo received, step: {step}")
     
     if step == 'thumbnail':
         # সর্বোচ্চ রেজোলিউশনের ফটো নিন
@@ -913,7 +901,6 @@ async def handle_upload_message(update: Update, context: ContextTypes.DEFAULT_TY
             "🖼️ *এখন থাম্বনেল আপলোড করুন:*\n\n"
             "1. একটি ছবি পাঠান (JPEG/PNG)\n"
             "2. অথবা থাম্বনেল ছাড়াই কন্টিনিউ করুন",
-            reply_markup=reply_markup,
             parse_mode='Markdown'
         )
 
@@ -999,6 +986,7 @@ def main():
     application.add_handler(CommandHandler("removeagent", remove_agent_command))
     application.add_handler(CommandHandler("stats", show_stats_command))
     application.add_handler(CommandHandler("agents", show_agents_command))
+    application.add_handler(CommandHandler("cancel", cancel_command))
     
     # বাটন হ্যান্ডলার
     application.add_handler(CallbackQueryHandler(button_handler))
@@ -1015,14 +1003,14 @@ def main():
     
     # বট শুরু
     print("=" * 50)
-    print("✅ Movie Bot চালু হয়েছে! (সব ফিচার এভেইলেবল)")
+    print("✅ Movie Bot চালু হয়েছে! (থাম্বনেল ফিক্সড)")
     print(f"🔑 Admin ID: 5347353883")
     print("📱 Telegram এ যান এবং বটে /start দিন")
     print("=" * 50)
     print("🎬 মুভি আপলোড: কাজ করবে")
+    print("🖼️ থাম্বনেল: কাজ করবে")
     print("👥 এজেন্ট ম্যানেজ: কাজ করবে")
     print("🔍 সার্চ: কাজ করবে")
-    print("📊 স্ট্যাটস: কাজ করবে")
     print("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
@@ -1076,6 +1064,10 @@ async def show_agents_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     text += f"\n💰 *মোট এজেন্ট:* {len(agents)}"
     
     await update.message.reply_text(text, parse_mode='Markdown')
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("✅ সব অপারেশন ক্লিয়ার হয়েছে!", parse_mode='Markdown')
 
 if __name__ == '__main__':
     main()
