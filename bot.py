@@ -4,7 +4,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import sqlite3
 from datetime import datetime
-import re
 
 # লগিং সেটআপ
 logging.basicConfig(
@@ -31,7 +30,7 @@ class Database:
             )
         ''')
         
-        # Movies টেবিল - থাম্বনেল ফিল্ড যোগ করা হয়েছে
+        # Movies টেবিল
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS movies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +40,7 @@ class Database:
                 language TEXT,
                 size TEXT,
                 download_link TEXT,
-                thumbnail TEXT,  -- নতুন ফিল্ড
+                thumbnail TEXT,
                 uploader_id INTEGER,
                 upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -112,23 +111,29 @@ class Database:
         return self.cursor.fetchall()
     
     def add_agent(self, agent_id, admin_id):
-        # ইউজার টেবিলে অ্যাড করুন
-        self.cursor.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (agent_id,))
-        self.cursor.execute('UPDATE users SET role = ? WHERE user_id = ?', ('agent', agent_id))
-        # এজেন্ট টেবিলে
+        # ইউজার টেবিলে চেক করুন
+        self.cursor.execute('SELECT role FROM users WHERE user_id = ?', (agent_id,))
+        result = self.cursor.fetchone()
+        
+        if result:
+            # ইউজার আছে, রোল আপডেট করুন
+            self.cursor.execute('UPDATE users SET role = ? WHERE user_id = ?', ('agent', agent_id))
+        else:
+            # নতুন ইউজার অ্যাড করুন
+            self.cursor.execute('INSERT INTO users (user_id, role) VALUES (?, ?)', (agent_id, 'agent'))
+        
+        # এজেন্ট টেবিলে অ্যাড করুন
         self.cursor.execute('INSERT OR REPLACE INTO agents (agent_id, added_by) VALUES (?, ?)', (agent_id, admin_id))
         self.conn.commit()
         return True
     
     def remove_agent(self, agent_id):
+        # ইউজার টেবিলে রোল আপডেট
         self.cursor.execute('UPDATE users SET role = ? WHERE user_id = ?', ('user', agent_id))
+        # এজেন্ট টেবিল থেকে রিমুভ
         self.cursor.execute('DELETE FROM agents WHERE agent_id = ?', (agent_id,))
         self.conn.commit()
         return True
-    
-    def is_agent(self, user_id):
-        self.cursor.execute('SELECT COUNT(*) FROM agents WHERE agent_id = ?', (user_id,))
-        return self.cursor.fetchone()[0] > 0
     
     def get_stats(self):
         self.cursor.execute('SELECT COUNT(*) FROM users')
@@ -188,20 +193,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     নিচের বাটনগুলো ব্যবহার করুন:"""
     
     keyboard = [
-        [InlineKeyboardButton("🔍 মুভি সার্চ", callback_data="search")],
-        [InlineKeyboardButton("📥 নতুন মুভি", callback_data="latest")],
-        [InlineKeyboardButton("📝 মুভি রিকোয়েস্ট", callback_data="request_movie")]
+        [InlineKeyboardButton("🔍 মুভি সার্চ", callback_data="browse_search")],
+        [InlineKeyboardButton("📥 নতুন মুভি", callback_data="browse_latest")],
+        [InlineKeyboardButton("📝 মুভি রিকোয়েস্ট", callback_data="browse_request")]
     ]
     
     # অ্যাডমিন/এজেন্ট মেনু
     if role in ['admin', 'agent']:
-        keyboard.append([InlineKeyboardButton("📤 মুভি আপলোড", callback_data="upload_movie")])
+        keyboard.append([InlineKeyboardButton("📤 মুভি আপলোড", callback_data="browse_upload")])
     
     # শুধু অ্যাডমিন
     if role == 'admin':
         keyboard.append([
-            InlineKeyboardButton("👥 এজেন্ট ম্যানেজ", callback_data="manage_agents"),
-            InlineKeyboardButton("📊 স্ট্যাটস", callback_data="stats")
+            InlineKeyboardButton("👥 এজেন্ট ম্যানেজ", callback_data="browse_agents"),
+            InlineKeyboardButton("📊 স্ট্যাটস", callback_data="browse_stats")
         ])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -222,84 +227,78 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "home":
         await start_callback(query, user_id)
     
-    # মুভি ব্রাউজ
-    elif data == "latest":
-        await show_latest(query)
-    
-    # সার্চ
-    elif data == "search":
+    # ব্রাউজ মেনু
+    elif data == "browse_search":
         await search_movie_prompt(query)
     
-    # রিকোয়েস্ট
-    elif data == "request_movie":
+    elif data == "browse_latest":
+        await show_latest(query)
+    
+    elif data == "browse_request":
         await request_movie_prompt(query)
     
-    # মুভি আপলোড
-    elif data == "upload_movie" and role in ['admin', 'agent']:
+    elif data == "browse_upload" and role in ['admin', 'agent']:
         context.user_data.clear()
         context.user_data['upload_mode'] = True
         context.user_data['upload_step'] = 'title'
         context.user_data['movie_data'] = {}
         await upload_step_title(query)
     
-    # এজেন্ট ম্যানেজমেন্ট
-    elif data == "manage_agents" and role == 'admin':
+    elif data == "browse_agents" and role == 'admin':
         await manage_agents_menu(query)
     
-    # স্ট্যাটস
-    elif data == "stats" and role == 'admin':
+    elif data == "browse_stats" and role == 'admin':
         await show_stats(query)
     
-    # আপলোড কনফার্ম
+    # আপলোড রিলেটেড
     elif data == "confirm_upload":
         await confirm_upload(query, context)
     
-    # আপলোড ক্যান্সেল
     elif data == "cancel_upload":
         context.user_data.clear()
         await query.edit_message_text("❌ আপলোড বাতিল হয়েছে!", parse_mode='Markdown')
         await start_callback(query, user_id)
     
-    # থাম্বনেল আপলোড স্কিপ
     elif data == "skip_thumbnail":
-        context.user_data['skip_thumbnail'] = True
+        context.user_data['upload_step'] = 'summary'
         await upload_show_summary(query, context)
     
-    # থাম্বনেল আপলোড
     elif data == "add_thumbnail":
         context.user_data['upload_step'] = 'thumbnail'
         await upload_step_thumbnail(query)
     
-    # মুভি ডিটেলস দেখান
+    elif data == "show_summary_after_photo":
+        await upload_show_summary(query, context)
+    
+    # মুভি ডিটেলস
     elif data.startswith("movie_"):
         movie_id = int(data.split("_")[1])
         await show_movie_details(query, movie_id, context.bot)
     
-    # এজেন্ট ডিলিট কনফার্মেশন
+    # এজেন্ট ম্যানেজমেন্ট
+    elif data == "agent_add_prompt":
+        await add_agent_prompt(query)
+    
+    elif data == "agent_remove_menu":
+        await remove_agent_menu(query)
+    
+    elif data == "agent_list":
+        await show_agent_list(query)
+    
     elif data.startswith("confirm_delete_agent_"):
         agent_id = int(data.split("_")[3])
         await confirm_delete_agent(query, agent_id)
     
-    # এজেন্ট ডিলিট এক্সিকিউট
     elif data.startswith("delete_agent_now_"):
         agent_id = int(data.split("_")[3])
         db.remove_agent(agent_id)
         await query.edit_message_text(f"✅ এজেন্ট `{agent_id}` সফলভাবে রিমুভ করা হয়েছে!", parse_mode='Markdown')
         await manage_agents_menu(query)
     
-    # এজেন্ট ডিলিট ক্যান্সেল
     elif data == "cancel_delete_agent":
         await manage_agents_menu(query)
     
-    # এজেন্ট লিস্ট
-    elif data == "agent_list":
-        await show_agent_list(query)
-    
-    # এজেন্ট রিমুভ মেনু
-    elif data == "remove_agent_menu":
-        await remove_agent_menu(query)
-    
-    # রিকোয়েস্ট লিস্ট
+    # রিকোয়েস্ট
     elif data == "my_requests":
         await show_my_requests(query, user_id)
     
@@ -310,25 +309,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ মুভি `{movie_id}` ডিলিট করা হয়েছে!", parse_mode='Markdown')
         await show_latest(query)
     
+    # যদি কোন ক্যালব্যাক ম্যাচ না করে
     else:
-        await query.edit_message_text("⚠️ এই ফিচারটি এখনো এভেইলেবল নয়!", parse_mode='Markdown')
+        await query.edit_message_text("❓ দয়া করে মেইন মেনু থেকে পছন্দ করুন", parse_mode='Markdown')
+        await start_callback(query, user_id)
 
 async def start_callback(query, user_id):
     role = db.get_user_role(user_id)
     
     keyboard = [
-        [InlineKeyboardButton("🔍 মুভি সার্চ", callback_data="search")],
-        [InlineKeyboardButton("📥 নতুন মুভি", callback_data="latest")],
-        [InlineKeyboardButton("📝 মুভি রিকোয়েস্ট", callback_data="request_movie")]
+        [InlineKeyboardButton("🔍 মুভি সার্চ", callback_data="browse_search")],
+        [InlineKeyboardButton("📥 নতুন মুভি", callback_data="browse_latest")],
+        [InlineKeyboardButton("📝 মুভি রিকোয়েস্ট", callback_data="browse_request")]
     ]
     
     if role in ['admin', 'agent']:
-        keyboard.append([InlineKeyboardButton("📤 মুভি আপলোড", callback_data="upload_movie")])
+        keyboard.append([InlineKeyboardButton("📤 মুভি আপলোড", callback_data="browse_upload")])
     
     if role == 'admin':
         keyboard.append([
-            InlineKeyboardButton("👥 এজেন্ট ম্যানেজ", callback_data="manage_agents"),
-            InlineKeyboardButton("📊 স্ট্যাটস", callback_data="stats")
+            InlineKeyboardButton("👥 এজেন্ট ম্যানেজ", callback_data="browse_agents"),
+            InlineKeyboardButton("📊 স্ট্যাটস", callback_data="browse_stats")
         ])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -391,7 +392,7 @@ async def show_movie_details(query, movie_id, bot):
     
     keyboard = [
         [InlineKeyboardButton("⬇️ ডাউনলোড লিংক", url=link)],
-        [InlineKeyboardButton("🔙 পিছনে", callback_data="latest")]
+        [InlineKeyboardButton("🔙 নতুন মুভি", callback_data="browse_latest")]
     ]
     
     # অ্যাডমিন হলে ডিলিট বাটন
@@ -413,12 +414,13 @@ async def show_movie_details(query, movie_id, bot):
                 parse_mode='Markdown'
             )
             await query.delete_message()
-        except:
+        except Exception as e:
+            print(f"Error sending photo: {e}")
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     else:
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
-# ==================== মুভি আপলোড সিস্টেম (থাম্বনেল সহ) ====================
+# ==================== মুভি আপলোড সিস্টেম ====================
 async def upload_step_title(query):
     text = """
 📤 *মুভি আপলোড সিস্টেম*
@@ -437,104 +439,9 @@ async def upload_step_title(query):
     
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
-async def upload_step_year(query, title):
-    text = f"""
-✅ নাম সেভ হয়েছে: *{title}*
-
-📅 *ধাপ ২/৭: মুভির সাল*
-মুভি প্রকাশের সাল লিখুন:
-
-উদাহরণ:
-• 2023
-• 2022
-• 2021
-"""
-    
-    keyboard = [[InlineKeyboardButton("❌ বাতিল", callback_data="cancel_upload")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-async def upload_step_quality(query, title, year):
-    text = f"""
-✅ সাল সেভ হয়েছে: *{year}*
-
-⚡ *ধাপ ৩/৭: ভিডিও কোয়ালিটি*
-ভিডিওর রেজোলিউশন লিখুন:
-
-উদাহরণ:
-• 1080p WEB-DL
-• 720p HDRip
-• 480p
-• 4K UHD
-"""
-    
-    keyboard = [[InlineKeyboardButton("❌ বাতিল", callback_data="cancel_upload")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-async def upload_step_language(query, title, year, quality):
-    text = f"""
-✅ কোয়ালিটি সেভ হয়েছে: *{quality}*
-
-🗣️ *ধাপ ৪/৭: অডিও/সাবটাইটেল*
-ভাষা লিখুন:
-
-উদাহরণ:
-• বাংলা ডাবিং
-• বাংলা সাবটাইটেল
-• হিন্দি ডাবিং
-• ইংরেজি
-"""
-    
-    keyboard = [[InlineKeyboardButton("❌ বাতিল", callback_data="cancel_upload")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-async def upload_step_size(query, title, year, quality, language):
-    text = f"""
-✅ ভাষা সেভ হয়েছে: *{language}*
-
-💾 *ধাপ ৫/৭: ফাইল সাইজ*
-মুভির ফাইল সাইজ লিখুন:
-
-উদাহরণ:
-• 1.5GB
-• 2.3GB
-• 850MB
-• 4.7GB
-"""
-    
-    keyboard = [[InlineKeyboardButton("❌ বাতিল", callback_data="cancel_upload")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-async def upload_step_link(query, title, year, quality, language, size):
-    text = f"""
-✅ সাইজ সেভ হয়েছে: *{size}*
-
-🔗 *ধাপ ৬/৭: ডাউনলোড লিংক*
-ডাউনলোড লিংক দিন:
-
-উদাহরণ:
-• https://drive.google.com/file/...
-• https://mega.nz/file/...
-• https://example.com/download.zip
-
-⚠️ *সতর্কতা:* ভ্যালিড লিংক দিন!
-"""
-    
-    keyboard = [[InlineKeyboardButton("❌ বাতিল", callback_data="cancel_upload")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
 async def upload_step_thumbnail(query):
     text = """
-🖼️ *ধাপ ৭/৭: থাম্বনেল ছবি*
+🖼️ *থাম্বনেল ছবি*
 
 আপনি চাইলে মুভির থাম্বনেল ছবি আপলোড করতে পারেন:
 1. একটি ছবি পাঠান (JPEG/PNG)
@@ -647,20 +554,28 @@ async def manage_agents_menu(query):
         for agent_id, username, added_date in agents:
             username_display = f"@{username}" if username else "No Username"
             text += f"• `{agent_id}` - {username_display}\n"
-            text += f"  📅 যোগ: {added_date[:10] if added_date else 'N/A'}\n"
-        text += f"\nমোট এজেন্ট: {len(agents)}"
+        text += f"\n💰 মোট এজেন্ট: {len(agents)}"
     else:
         text += "📭 *কোন এজেন্ট নেই*"
     
     keyboard = [
-        [InlineKeyboardButton("➕ নতুন এজেন্ট অ্যাড", callback_data="add_agent_prompt")],
-        [InlineKeyboardButton("➖ এজেন্ট রিমুভ", callback_data="remove_agent_menu")],
+        [InlineKeyboardButton("➕ নতুন এজেন্ট অ্যাড", callback_data="agent_add_prompt")],
+        [InlineKeyboardButton("➖ এজেন্ট রিমুভ", callback_data="agent_remove_menu")],
         [InlineKeyboardButton("📋 এজেন্ট লিস্ট", callback_data="agent_list")],
         [InlineKeyboardButton("🔙 হোম", callback_data="home")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def add_agent_prompt(query):
+    await query.edit_message_text(
+        "➕ *নতুন এজেন্ট অ্যাড*\n\n"
+        "নতুন এজেন্টের **টেলিগ্রাম আইডি** পাঠান:\n\n"
+        "📌 *উদাহরণ:* `1234567890`\n\n"
+        "ℹ️ *নোট:* ব্যক্তিকে আগে বটে /start করতে হবে",
+        parse_mode='Markdown'
+    )
 
 async def show_agent_list(query):
     agents = db.get_agents_with_details()
@@ -681,8 +596,8 @@ async def show_agent_list(query):
     text += f"\n💰 *মোট এজেন্ট:* {len(agents)}"
     
     keyboard = [
-        [InlineKeyboardButton("➖ এজেন্ট রিমুভ", callback_data="remove_agent_menu")],
-        [InlineKeyboardButton("🔙 এজেন্ট ম্যানেজ", callback_data="manage_agents")]
+        [InlineKeyboardButton("➖ এজেন্ট রিমুভ", callback_data="agent_remove_menu")],
+        [InlineKeyboardButton("🔙 এজেন্ট ম্যানেজ", callback_data="browse_agents")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -700,7 +615,7 @@ async def remove_agent_menu(query):
     
     keyboard = []
     
-    for agent_id, username, added_date in agents[:10]:  # সর্বোচ্চ ১০টি
+    for agent_id, username, added_date in agents[:10]:
         username_display = f"@{username}" if username else "No Username"
         button_text = f"❌ {agent_id} - {username_display}"
         if len(button_text) > 50:
@@ -711,7 +626,7 @@ async def remove_agent_menu(query):
             callback_data=f"confirm_delete_agent_{agent_id}"
         )])
     
-    keyboard.append([InlineKeyboardButton("🔙 এজেন্ট ম্যানেজ", callback_data="manage_agents")])
+    keyboard.append([InlineKeyboardButton("🔙 এজেন্ট ম্যানেজ", callback_data="browse_agents")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -825,7 +740,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_upload_message(update, context)
         return
     
-    # ৩. যদি অ্যাডমিন এজেন্ট আইডি পাঠায়
+    # ৩. যদি অ্যাডমিন এজেন্ট আইডি পাঠায় (সাধারণ মেসেজ হিসেবে)
     if role == 'admin' and message_text.isdigit():
         agent_id = int(message_text)
         success = db.add_agent(agent_id, user_id)
@@ -1019,7 +934,6 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /stats - স্ট্যাটিস্টিকস
 /delete <movie_id> - মুভি ডিলিট
 /agents - এজেন্ট লিস্ট
-/force_thumbnail <movie_id> - থাম্বনেল আপডেট
 """
     
     await update.message.reply_text(text, parse_mode='Markdown')
@@ -1084,6 +998,7 @@ def main():
     application.add_handler(CommandHandler("addagent", add_agent_command))
     application.add_handler(CommandHandler("removeagent", remove_agent_command))
     application.add_handler(CommandHandler("stats", show_stats_command))
+    application.add_handler(CommandHandler("agents", show_agents_command))
     
     # বাটন হ্যান্ডলার
     application.add_handler(CallbackQueryHandler(button_handler))
@@ -1095,15 +1010,19 @@ def main():
     ))
     application.add_handler(MessageHandler(
         filters.PHOTO,
-        handle_message  # ফটোও একই হ্যান্ডলারে যাবে
+        handle_message
     ))
     
     # বট শুরু
     print("=" * 50)
-    print("🎬 Movie Bot চালু হয়েছে! (থাম্বনেল + এজেন্ট রিমুভ সহ)")
+    print("✅ Movie Bot চালু হয়েছে! (সব ফিচার এভেইলেবল)")
     print(f"🔑 Admin ID: 5347353883")
-    print(f"🤖 Bot Token: {BOT_TOKEN[:15]}...")
     print("📱 Telegram এ যান এবং বটে /start দিন")
+    print("=" * 50)
+    print("🎬 মুভি আপলোড: কাজ করবে")
+    print("👥 এজেন্ট ম্যানেজ: কাজ করবে")
+    print("🔍 সার্চ: কাজ করবে")
+    print("📊 স্ট্যাটস: কাজ করবে")
     print("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
@@ -1128,6 +1047,33 @@ async def show_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 🕐 *সিস্টেম টাইম:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+async def show_agents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    role = db.get_user_role(user_id)
+    
+    if role != 'admin':
+        await update.message.reply_text("❌ আপনার অ্যাডমিন এক্সেস নেই!", parse_mode='Markdown')
+        return
+    
+    agents = db.get_agents_with_details()
+    
+    if not agents:
+        await update.message.reply_text("📭 কোন এজেন্ট নেই!", parse_mode='Markdown')
+        return
+    
+    text = "📋 *এজেন্ট লিস্ট:*\n\n"
+    
+    for agent_id, username, added_date in agents:
+        username_display = f"@{username}" if username else "No Username"
+        text += f"🆔 *ID:* `{agent_id}`\n"
+        text += f"👤 *Username:* {username_display}\n"
+        text += f"📅 *যোগ দেওয়ার তারিখ:* {added_date[:10] if added_date else 'N/A'}\n"
+        text += "─" * 20 + "\n"
+    
+    text += f"\n💰 *মোট এজেন্ট:* {len(agents)}"
     
     await update.message.reply_text(text, parse_mode='Markdown')
 
